@@ -1,0 +1,77 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        DOCKER_IMAGE = 'mypro'
+        TERRAFORM_DIR = 'terraform'
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                git branch: 'master', url: 'https://github.com/Msocial123/EcommerceApp.git'
+            }
+        }
+
+        stage('Terraform Init & Apply') {
+            steps {
+                dir("${TERRAFORM_DIR}") {
+                    sh 'terraform init'
+                    sh 'terraform apply -auto-approve'
+                }
+            }
+        }
+
+        stage('Install Docker on EC2') {
+            steps {
+                script {
+                    // Get EC2 public IP from Terraform output
+                    def ec2_ip = sh(script: "terraform -chdir=${TERRAFORM_DIR} output -raw jenkins_server_public_ip", returnStdout: true).trim()
+                    env.EC2_IP = ec2_ip
+
+                    // Install Docker & Java on EC2 via SSH
+                    sh """
+                    ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${EC2_IP} '
+                        sudo apt update -y
+                        sudo apt install -y docker.io openjdk-21-jdk
+                        sudo systemctl start docker
+                        sudo usermod -aG docker ubuntu
+                    '
+                    """
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                dir('EcommerceApp') {
+                    sh 'docker build -t $DOCKER_IMAGE .'
+                }
+            }
+        }
+
+        stage('Deploy Docker Container on EC2') {
+            steps {
+                sshagent(['my-ssh-credentials']) {  // Jenkins credential for private key
+                    sh """
+                    ssh -o StrictHostKeyChecking=no ubuntu@${EC2_IP} '
+                        docker stop $DOCKER_IMAGE || true
+                        docker rm $DOCKER_IMAGE || true
+                        docker run -d -p 8080:8080 --name $DOCKER_IMAGE $DOCKER_IMAGE
+                    '
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ App deployed successfully! Access at http://${env.EC2_IP}:8080"
+        }
+        failure {
+            echo "❌ Pipeline failed!"
+        }
+    }
+}
